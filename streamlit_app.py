@@ -374,7 +374,7 @@ def main():
         st.warning("Please select both a start date and an end date.")
         st.stop()
 
-    st.info(f"Selected range: {start_date} to {end_date}")
+    st.info(f"Select a start date from 01-2008")
 
     try:
         months = get_required_months(start_date, end_date)
