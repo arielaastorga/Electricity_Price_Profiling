@@ -445,12 +445,6 @@ def main():
         if selected_barra == "All":
             selected_barra = None
 
-    cluster_method = st.selectbox(
-        "Clustering method",
-        options=["kmeans", "kmedoids"],
-        index=0
-    )
-
     n_clusters = st.slider(
         "Number of clusters",
         min_value=2,
@@ -465,77 +459,89 @@ def main():
             month_diff = months_between(start_date, end_date)
 
             if day_diff == 0:
-                result = build_single_day_curve(
+                single_result = build_single_day_curve(
                     df=df,
                     barra=selected_barra,
                     target_date=start_date
                 )
-                result["title"] = f"Hourly curve - {start_date}"
-                st.session_state["curve_results"] = result
+                single_result["title"] = f"Hourly curve - {start_date}"
+
+                st.session_state["curve_results_single_day"] = single_result
+                st.session_state.pop("curve_results_kmeans", None)
+                st.session_state.pop("curve_results_kmedoids", None)
 
             elif month_diff == 0:
-                daily_results = cluster_curves(
+                daily_results_kmeans = cluster_curves(
                     df=df,
                     n_clusters=n_clusters,
                     barra=selected_barra,
                     start_date=start_date,
                     end_date=end_date,
-                    method=cluster_method
+                    method="kmeans"
                 )
-                result = build_typical_profiles_for_period(daily_results)
-                result["title"] = f"Typical profiles for the selected period ({cluster_method.upper()})"
-                result["daily_matrix"] = daily_results["daily_matrix"]
-                result["method"] = cluster_method
-                st.session_state["curve_results"] = result
+                result_kmeans = build_typical_profiles_for_period(daily_results_kmeans)
+                result_kmeans["title"] = "Typical profiles for the selected period (KMeans)"
+                result_kmeans["daily_matrix"] = daily_results_kmeans["daily_matrix"]
+
+                daily_results_kmedoids = cluster_curves(
+                    df=df,
+                    n_clusters=n_clusters,
+                    barra=selected_barra,
+                    start_date=start_date,
+                    end_date=end_date,
+                    method="kmedoids"
+                )
+                result_kmedoids = build_typical_profiles_for_period(daily_results_kmedoids)
+                result_kmedoids["title"] = "Typical profiles for the selected period (KMedoids)"
+                result_kmedoids["daily_matrix"] = daily_results_kmedoids["daily_matrix"]
+
+                st.session_state["curve_results_kmeans"] = result_kmeans
+                st.session_state["curve_results_kmedoids"] = result_kmedoids
+                st.session_state.pop("curve_results_single_day", None)
 
             else:
-                daily_results = cluster_curves(
+                daily_results_kmeans = cluster_curves(
                     df=df,
                     n_clusters=n_clusters,
                     barra=selected_barra,
                     start_date=start_date,
                     end_date=end_date,
-                    method=cluster_method
+                    method="kmeans"
                 )
-                result = build_monthly_typical_profiles(daily_results)
-                result["title"] = f"Monthly typical day profiles ({cluster_method.upper()})"
-                result["daily_matrix"] = daily_results["daily_matrix"]
-                result["method"] = cluster_method
-                st.session_state["curve_results"] = result
+                result_kmeans = build_monthly_typical_profiles(daily_results_kmeans)
+                result_kmeans["title"] = "Monthly typical day profiles (KMeans)"
+                result_kmeans["daily_matrix"] = daily_results_kmeans["daily_matrix"]
+
+                daily_results_kmedoids = cluster_curves(
+                    df=df,
+                    n_clusters=n_clusters,
+                    barra=selected_barra,
+                    start_date=start_date,
+                    end_date=end_date,
+                    method="kmedoids"
+                )
+                result_kmedoids = build_monthly_typical_profiles(daily_results_kmedoids)
+                result_kmedoids["title"] = "Monthly typical day profiles (KMedoids)"
+                result_kmedoids["daily_matrix"] = daily_results_kmedoids["daily_matrix"]
+
+                st.session_state["curve_results_kmeans"] = result_kmeans
+                st.session_state["curve_results_kmedoids"] = result_kmedoids
+                st.session_state.pop("curve_results_single_day", None)
 
             st.success("Profiles generated successfully.")
 
         except Exception as e:
             st.error(f"Error while generating profiles: {e}")
 
-    if "curve_results" in st.session_state:
-        result = st.session_state["curve_results"]
+    if "curve_results_single_day" in st.session_state:
+        result = st.session_state["curve_results_single_day"]
         profiles = result["profiles"]
         hours = result["hours"]
         title = result["title"]
-        mode = result["mode"]
 
         st.subheader("Profiles")
         fig = build_profiles_plot(profiles, hours, title)
         st.plotly_chart(fig, use_container_width=True)
-
-        if "daily_matrix" in result:
-            with st.expander("Daily matrix"):
-                st.dataframe(result["daily_matrix"].head(30), use_container_width=True)
-
-        if mode == "monthly":
-            st.subheader("Dominant cluster by month")
-            cluster_df = pd.DataFrame(
-                [{"month": k, "dominant_cluster": v} for k, v in result["cluster_reference"].items()]
-            ).sort_values("month")
-            st.dataframe(cluster_df, use_container_width=True)
-
-        elif mode == "period":
-            st.subheader("Dominant cluster for the selected period")
-            cluster_df = pd.DataFrame(
-                [{"period": k, "dominant_cluster": v} for k, v in result["cluster_reference"].items()]
-            )
-            st.dataframe(cluster_df, use_container_width=True)
 
         st.subheader("Plotted data")
         st.dataframe(profiles, use_container_width=True)
@@ -544,8 +550,91 @@ def main():
         st.download_button(
             label="Download profiles",
             data=csv_profiles,
-            file_name="profiles_output.csv",
-            mime="text/csv"
+            file_name="profiles_output_single_day.csv",
+            mime="text/csv",
+            key="download_single_day"
+        )
+
+    if "curve_results_kmeans" in st.session_state:
+        result = st.session_state["curve_results_kmeans"]
+        profiles = result["profiles"]
+        hours = result["hours"]
+        title = result["title"]
+        mode = result["mode"]
+
+        st.subheader("KMeans profiles")
+        fig = build_profiles_plot(profiles, hours, title)
+        st.plotly_chart(fig, use_container_width=True)
+
+        if "daily_matrix" in result:
+            with st.expander("KMeans daily matrix"):
+                st.dataframe(result["daily_matrix"].head(30), use_container_width=True)
+
+        if mode == "monthly":
+            st.subheader("KMeans dominant cluster by month")
+            cluster_df = pd.DataFrame(
+                [{"month": k, "dominant_cluster": v} for k, v in result["cluster_reference"].items()]
+            ).sort_values("month")
+            st.dataframe(cluster_df, use_container_width=True)
+
+        elif mode == "period":
+            st.subheader("KMeans dominant cluster for the selected period")
+            cluster_df = pd.DataFrame(
+                [{"period": k, "dominant_cluster": v} for k, v in result["cluster_reference"].items()]
+            )
+            st.dataframe(cluster_df, use_container_width=True)
+
+        st.subheader("KMeans plotted data")
+        st.dataframe(profiles, use_container_width=True)
+
+        csv_profiles = profiles.to_csv(index=True).encode("utf-8")
+        st.download_button(
+            label="Download KMeans profiles",
+            data=csv_profiles,
+            file_name="profiles_output_kmeans.csv",
+            mime="text/csv",
+            key="download_kmeans"
+        )
+
+    if "curve_results_kmedoids" in st.session_state:
+        result = st.session_state["curve_results_kmedoids"]
+        profiles = result["profiles"]
+        hours = result["hours"]
+        title = result["title"]
+        mode = result["mode"]
+
+        st.subheader("KMedoids profiles")
+        fig = build_profiles_plot(profiles, hours, title)
+        st.plotly_chart(fig, use_container_width=True)
+
+        if "daily_matrix" in result:
+            with st.expander("KMedoids daily matrix"):
+                st.dataframe(result["daily_matrix"].head(30), use_container_width=True)
+
+        if mode == "monthly":
+            st.subheader("KMedoids dominant cluster by month")
+            cluster_df = pd.DataFrame(
+                [{"month": k, "dominant_cluster": v} for k, v in result["cluster_reference"].items()]
+            ).sort_values("month")
+            st.dataframe(cluster_df, use_container_width=True)
+
+        elif mode == "period":
+            st.subheader("KMedoids dominant cluster for the selected period")
+            cluster_df = pd.DataFrame(
+                [{"period": k, "dominant_cluster": v} for k, v in result["cluster_reference"].items()]
+            )
+            st.dataframe(cluster_df, use_container_width=True)
+
+        st.subheader("KMedoids plotted data")
+        st.dataframe(profiles, use_container_width=True)
+
+        csv_profiles = profiles.to_csv(index=True).encode("utf-8")
+        st.download_button(
+            label="Download KMedoids profiles",
+            data=csv_profiles,
+            file_name="profiles_output_kmedoids.csv",
+            mime="text/csv",
+            key="download_kmedoids"
         )
 
 
