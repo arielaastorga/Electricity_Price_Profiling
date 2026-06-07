@@ -1,6 +1,3 @@
-# streamlit_app.py
-# Versión adaptada para Streamlit Community Cloud
-
 from pathlib import Path
 from datetime import date
 import re
@@ -11,7 +8,7 @@ import plotly.graph_objects as go
 
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
-
+from sklearn_extra.cluster import KMedoids
 
 # ==========================================================
 # CONFIG
@@ -23,7 +20,6 @@ st.set_page_config(
     page_title="Electricity Price Profiling",
     layout="wide"
 )
-
 
 # ==========================================================
 # FECHAS
@@ -51,7 +47,6 @@ def get_required_months(start_date, end_date):
 def months_between(start_date, end_date):
     return (end_date.year - start_date.year) * 12 + (end_date.month - start_date.month)
 
-
 # ==========================================================
 # ARCHIVOS
 # ==========================================================
@@ -75,7 +70,6 @@ def list_all_csv_files(data_dir=DATA_DIR):
 def get_files_for_months(months, data_dir=DATA_DIR):
     all_files = list_all_csv_files(data_dir)
     return [f for f in all_files if extract_month_from_filename(f.name) in months]
-
 
 # ==========================================================
 # LECTURA CSV
@@ -159,7 +153,6 @@ def load_selected_csvs(file_paths_as_str: tuple):
     combined_df = pd.concat(dfs, ignore_index=True)
     return combined_df, loaded_files, failed_files
 
-
 # ==========================================================
 # PREPARACIÓN
 # ==========================================================
@@ -204,12 +197,17 @@ def filter_by_date_range(work: pd.DataFrame, start_date, end_date):
     end_ts = pd.Timestamp(end_date)
     return work[(work["date"] >= start_ts) & (work["date"] <= end_ts)].copy()
 
-
 # ==========================================================
-# KMEANS CURVES
+# CLUSTERING
 # ==========================================================
-def kmeans_curves(df: pd.DataFrame, n_clusters: int = 7, barra: str | None = None,
-                  start_date=None, end_date=None):
+def cluster_curves(
+    df: pd.DataFrame,
+    n_clusters: int = 7,
+    barra: str | None = None,
+    start_date=None,
+    end_date=None,
+    method: str = "kmeans"
+):
     work = prepare_work_df(df, barra=barra)
 
     if start_date is not None and end_date is not None:
@@ -237,7 +235,24 @@ def kmeans_curves(df: pd.DataFrame, n_clusters: int = 7, barra: str | None = Non
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(daily.values)
 
-    model = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    method = method.lower().strip()
+
+    if method == "kmeans":
+        model = KMeans(
+            n_clusters=n_clusters,
+            random_state=42,
+            n_init=10
+        )
+    elif method == "kmedoids":
+        model = KMedoids(
+            n_clusters=n_clusters,
+            metric="euclidean",
+            init="k-medoids++",
+            random_state=42
+        )
+    else:
+        raise ValueError("method debe ser 'kmeans' o 'kmedoids'.")
+
     daily["cluster"] = model.fit_predict(X_scaled)
     daily["mes"] = daily.index.month
 
@@ -246,6 +261,7 @@ def kmeans_curves(df: pd.DataFrame, n_clusters: int = 7, barra: str | None = Non
         "hours": all_hours,
         "model": model,
         "scaler": scaler,
+        "method": method,
     }
 
 
@@ -324,7 +340,6 @@ def build_single_day_curve(df: pd.DataFrame, barra: str | None, target_date):
         "mode": "single_day"
     }
 
-
 # ==========================================================
 # PLOT
 # ==========================================================
@@ -351,7 +366,6 @@ def build_profiles_plot(profiles_df: pd.DataFrame, hours: list[int], title: str)
 
     return fig
 
-
 # ==========================================================
 # APP
 # ==========================================================
@@ -374,7 +388,7 @@ def main():
         st.warning("Please select both a start date and an end date.")
         st.stop()
 
-    st.info(f"Select a start date from 01-2008")
+    st.info(f"Selected range: {start_date} to {end_date}")
 
     try:
         months = get_required_months(start_date, end_date)
@@ -431,6 +445,12 @@ def main():
         if selected_barra == "All":
             selected_barra = None
 
+    cluster_method = st.selectbox(
+        "Clustering method",
+        options=["kmeans", "kmedoids"],
+        index=0
+    )
+
     n_clusters = st.slider(
         "Number of clusters",
         min_value=2,
@@ -454,29 +474,33 @@ def main():
                 st.session_state["curve_results"] = result
 
             elif month_diff == 0:
-                daily_results = kmeans_curves(
+                daily_results = cluster_curves(
                     df=df,
                     n_clusters=n_clusters,
                     barra=selected_barra,
                     start_date=start_date,
-                    end_date=end_date
+                    end_date=end_date,
+                    method=cluster_method
                 )
                 result = build_typical_profiles_for_period(daily_results)
-                result["title"] = "Typical profiles for the selected period (KMeans)"
+                result["title"] = f"Typical profiles for the selected period ({cluster_method.upper()})"
                 result["daily_matrix"] = daily_results["daily_matrix"]
+                result["method"] = cluster_method
                 st.session_state["curve_results"] = result
 
             else:
-                daily_results = kmeans_curves(
+                daily_results = cluster_curves(
                     df=df,
                     n_clusters=n_clusters,
                     barra=selected_barra,
                     start_date=start_date,
-                    end_date=end_date
+                    end_date=end_date,
+                    method=cluster_method
                 )
                 result = build_monthly_typical_profiles(daily_results)
-                result["title"] = "Monthly typical day profiles (KMeans)"
+                result["title"] = f"Monthly typical day profiles ({cluster_method.upper()})"
                 result["daily_matrix"] = daily_results["daily_matrix"]
+                result["method"] = cluster_method
                 st.session_state["curve_results"] = result
 
             st.success("Profiles generated successfully.")
