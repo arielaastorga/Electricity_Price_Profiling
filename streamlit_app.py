@@ -344,57 +344,6 @@ def cluster_profiles(work: pd.DataFrame, n_clusters: int, title: str):
     }
 
 
-def build_typical_profiles_for_period_kmedoids(work: pd.DataFrame, n_clusters: int, title: str):
-    daily = (
-        work.groupby(["date", "hora"])["valor"]
-        .mean()
-        .unstack(level="hora")
-        .sort_index(axis=1)
-    )
-
-    all_hours = list(range(1, 25))
-    daily = daily.reindex(columns=all_hours)
-    daily = daily.dropna(axis=0, how="any").copy()
-
-    if daily.empty:
-        raise ValueError("No hay días completos sin NaN para construir el perfil del período.")
-
-    if daily.shape[0] < n_clusters:
-        raise ValueError(
-            f"No hay suficientes días completos ({daily.shape[0]}) para formar {n_clusters} clusters."
-        )
-
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(daily.values)
-
-    model = KMedoids(
-        n_clusters=n_clusters,
-        metric="euclidean",
-        init="k-medoids++",
-        random_state=42,
-    )
-    labels = model.fit_predict(X_scaled)
-
-    daily["cluster"] = labels
-    cluster_counts = pd.Series(labels).value_counts()
-    dominant_cluster = int(cluster_counts.idxmax())
-
-    medoid_position = model.medoid_indices_[dominant_cluster]
-    medoid_date = daily.index[medoid_position]
-
-    profiles = pd.DataFrame(
-        [daily.loc[medoid_date, all_hours].values],
-        index=[f"Selected period - {medoid_date.date()}"],
-        columns=all_hours,
-    )
-
-    return {
-        "profiles": profiles,
-        "hours": all_hours,
-        "title": title,
-    }
-
-
 def build_single_day_curve(work: pd.DataFrame, target_date):
     target_ts = pd.Timestamp(target_date)
     one_day = work[work["date"] == target_ts].copy()
@@ -406,11 +355,8 @@ def build_single_day_curve(work: pd.DataFrame, target_date):
         one_day.groupby("hora")["valor"]
         .mean()
         .sort_index()
-        .reindex(range(1, 25))
-        .dropna()
+        .reindex(range(1, 25), fill_value=0)
     )
-
-    curve = curve.reindex(range(1, 25), fill_value=0)
 
     curve_df = pd.DataFrame(
         [curve.values],
@@ -425,7 +371,7 @@ def build_single_day_curve(work: pd.DataFrame, target_date):
     }
 
 
-def build_monthly_typical_profiles_kmedoids(work: pd.DataFrame, n_clusters: int, title: str):
+def build_monthly_representative_profiles(work: pd.DataFrame, n_clusters: int, title: str):
     daily = (
         work.groupby(["date", "hora"])["valor"]
         .mean()
@@ -457,26 +403,21 @@ def build_monthly_typical_profiles_kmedoids(work: pd.DataFrame, n_clusters: int,
     labels = model.fit_predict(X_scaled)
 
     daily["cluster"] = labels
-    daily["mes"] = daily.index.month
+    daily["month"] = daily.index.month
 
-    mes_cluster = (
-        daily.groupby("mes")["cluster"]
-        .agg(lambda x: x.mode().iloc[0])
-        .to_dict()
-    )
+    monthly_profiles = {}
+    for month in sorted(daily["month"].unique()):
+        month_days = daily[daily["month"] == month].copy()
+        dominant_cluster = month_days["cluster"].mode().iloc[0]
+        representative_days = month_days[month_days["cluster"] == dominant_cluster].copy()
+        representative_curve = representative_days[all_hours].mean()
+        monthly_profiles[f"Month {int(month)}"] = representative_curve
 
-    perfiles = {}
-    for mes, clus in mes_cluster.items():
-        cluster_dates = daily[daily["cluster"] == clus].index
-        medoid_date = cluster_dates[0]
-        perfiles[mes] = daily.loc[medoid_date, all_hours]
-
-    perfiles_df = pd.DataFrame(perfiles).T
-    perfiles_df.index.name = "month"
-    perfiles_df = perfiles_df.sort_index()
+    profiles_df = pd.DataFrame(monthly_profiles).T
+    profiles_df = profiles_df[all_hours]
 
     return {
-        "profiles": perfiles_df,
+        "profiles": profiles_df,
         "hours": all_hours,
         "title": title,
     }
@@ -669,22 +610,17 @@ def main():
             )
 
             day_diff = (pd.Timestamp(end_date) - pd.Timestamp(start_date)).days
-            month_diff = months_between(start_date, end_date)
 
             if day_diff == 0:
                 st.session_state["all_profiles"] = build_single_day_curve(work, start_date)
-            elif month_diff == 0:
-                st.session_state["all_profiles"] = build_typical_profiles_for_period_kmedoids(
-                    work,
-                    total_k,
-                    "Representative profile for selected period (K-Medoids)"
-                )
-            else:
-                st.session_state["all_profiles"] = build_monthly_typical_profiles_kmedoids(
+            elif day_diff > 30:
+                st.session_state["all_profiles"] = build_monthly_representative_profiles(
                     work,
                     total_k,
                     "Monthly representative profiles (K-Medoids)"
                 )
+            else:
+                st.session_state["all_profiles"] = build_single_day_curve(work, start_date)
 
             st.success("Representative K-Medoids profiles generated successfully.")
 
