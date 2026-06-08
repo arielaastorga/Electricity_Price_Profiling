@@ -93,6 +93,20 @@ def get_required_months(start_date, end_date):
     return months
 
 
+def get_month_starts(start_date, end_date):
+    month_starts = []
+    current = pd.Timestamp(start_date).replace(day=1)
+
+    while current <= pd.Timestamp(end_date):
+        month_starts.append(current)
+        if current.month == 12:
+            current = current.replace(year=current.year + 1, month=1, day=1)
+        else:
+            current = current.replace(month=current.month + 1, day=1)
+
+    return month_starts
+
+
 def months_between(start_date, end_date):
     return (end_date.year - start_date.year) * 12 + (end_date.month - start_date.month)
 
@@ -202,7 +216,7 @@ def prepare_work_df(df: pd.DataFrame, barra: str | None = None):
     work["hora"] = pd.to_numeric(work["hora"], errors="coerce")
     work["valor"] = pd.to_numeric(work["valor"], errors="coerce")
 
-    work = work.dropna(subset=["date", "hora", "valor"]).copy()
+    work = work.dropna(subset=["date", "hora"]).copy()
     work["hora"] = work["hora"].astype(int)
     work = work[(work["hora"] >= 1) & (work["hora"] <= 24)].copy()
 
@@ -245,7 +259,10 @@ def kpi_card(title, value, subtitle="", border_color=GENERAL_BORDER):
 
 
 def compute_kpis(work: pd.DataFrame):
-    analysis = work.copy()
+    analysis = work.dropna(subset=["valor"]).copy()
+
+    if analysis.empty:
+        raise ValueError("No hay valores válidos para calcular KPIs.")
 
     solar_mask = analysis["hora"].between(8, 18)
     non_solar_mask = analysis["hora"].between(19, 24) | analysis["hora"].between(1, 7)
@@ -290,23 +307,35 @@ def compute_kpis(work: pd.DataFrame):
     }
 
 
-def cluster_profiles(work: pd.DataFrame, n_clusters: int, title: str):
+def build_daily_matrix_with_imputation(work: pd.DataFrame):
     subset = work.copy()
-    subset = subset.dropna(subset=["date", "hora", "valor"])
+    subset = subset.groupby(["date", "hora"], as_index=False)["valor"].mean()
 
     daily = (
-        subset.groupby(["date", "hora"])["valor"]
-        .mean()
-        .unstack(level="hora")
+        subset.pivot(index="date", columns="hora", values="valor")
+        .sort_index()
         .sort_index(axis=1)
     )
 
     all_hours = list(range(1, 25))
     daily = daily.reindex(columns=all_hours)
-    daily = daily.dropna(axis=0, how="any").copy()
+
+    daily = daily.ffill(axis=0)
+    daily = daily.ffill(axis=1)
+    daily = daily.bfill(axis=1)
+    daily = daily.bfill(axis=0)
+
+    return daily, all_hours
+
+
+def cluster_profiles(work: pd.DataFrame, n_clusters: int, title: str):
+    daily, all_hours = build_daily_matrix_with_imputation(work)
 
     if daily.empty:
-        raise ValueError("No hay días completos sin NaN para generar perfiles.")
+        raise ValueError("No hay días disponibles para generar perfiles.")
+
+    if daily.isna().any().any():
+        raise ValueError("Persisten NaN después de la imputación.")
 
     if daily.shape[0] < n_clusters:
         raise ValueError(
@@ -324,11 +353,12 @@ def cluster_profiles(work: pd.DataFrame, n_clusters: int, title: str):
     )
     labels = model.fit_predict(X_scaled)
 
-    daily["cluster"] = labels
+    daily_labeled = daily.copy()
+    daily_labeled["cluster"] = labels
     medoid_positions = model.medoid_indices_
-    medoid_dates = daily.index[medoid_positions]
+    medoid_dates = daily_labeled.index[medoid_positions]
 
-    profiles = pd.DataFrame(daily.loc[medoid_dates, all_hours].values, columns=all_hours)
+    profiles = pd.DataFrame(daily_labeled.loc[medoid_dates, all_hours].values, columns=all_hours)
     profile_labels = []
 
     for cluster_id, medoid_date in enumerate(medoid_dates):
@@ -355,8 +385,13 @@ def build_single_day_curve(work: pd.DataFrame, target_date):
         one_day.groupby("hora")["valor"]
         .mean()
         .sort_index()
-        .reindex(range(1, 25), fill_value=0)
+        .reindex(range(1, 25))
     )
+
+    curve = curve.ffill().bfill()
+
+    if curve.isna().any():
+        raise ValueError("No fue posible imputar completamente la curva diaria.")
 
     curve_df = pd.DataFrame(
         [curve.values],
@@ -371,47 +406,32 @@ def build_single_day_curve(work: pd.DataFrame, target_date):
     }
 
 
-def build_monthly_representative_profiles(work: pd.DataFrame, n_clusters: int, title: str):
-    daily = (
-        work.groupby(["date", "hora"])["valor"]
-        .mean()
-        .unstack(level="hora")
-        .sort_index(axis=1)
-    )
-
-    all_hours = list(range(1, 25))
-    daily = daily.reindex(columns=all_hours)
-    daily = daily.dropna(axis=0, how="any").copy()
+def build_monthly_representative_profiles(work: pd.DataFrame, start_date, end_date, title: str):
+    daily, all_hours = build_daily_matrix_with_imputation(work)
 
     if daily.empty:
-        raise ValueError("No hay días completos sin NaN para construir perfiles mensuales.")
+        raise ValueError("No hay días disponibles para construir perfiles mensuales.")
 
-    if daily.shape[0] < n_clusters:
-        raise ValueError(
-            f"No hay suficientes días completos ({daily.shape[0]}) para formar {n_clusters} clusters."
-        )
+    if daily.isna().any().any():
+        raise ValueError("Persisten NaN después de la imputación mensual.")
 
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(daily.values)
-
-    model = KMedoids(
-        n_clusters=n_clusters,
-        metric="euclidean",
-        init="k-medoids++",
-        random_state=42,
-    )
-    labels = model.fit_predict(X_scaled)
-
-    daily["cluster"] = labels
-    daily["month"] = daily.index.month
-
+    month_starts = get_month_starts(start_date, end_date)
     monthly_profiles = {}
-    for month in sorted(daily["month"].unique()):
-        month_days = daily[daily["month"] == month].copy()
-        dominant_cluster = month_days["cluster"].mode().iloc[0]
-        representative_days = month_days[month_days["cluster"] == dominant_cluster].copy()
-        representative_curve = representative_days[all_hours].mean()
-        monthly_profiles[f"Month {int(month)}"] = representative_curve
+
+    for month_start in month_starts:
+        month_end = month_start + pd.offsets.MonthEnd(0)
+        month_mask = (daily.index >= month_start) & (daily.index <= month_end)
+        month_daily = daily.loc[month_mask].copy()
+
+        if month_daily.empty:
+            continue
+
+        representative_curve = month_daily.mean(axis=0)
+        month_label = f"Month {month_start.month}"
+        monthly_profiles[month_label] = representative_curve
+
+    if not monthly_profiles:
+        raise ValueError("No se pudieron construir curvas mensuales para el rango seleccionado.")
 
     profiles_df = pd.DataFrame(monthly_profiles).T
     profiles_df = profiles_df[all_hours]
@@ -572,7 +592,6 @@ def main():
         df, loaded_files, failed_files = load_selected_csvs(tuple(str(p) for p in selected_files))
         work = prepare_work_df(df, barra=selected_barra)
         work = filter_by_date_range(work, start_date, end_date)
-        work = work.dropna(subset=["date", "hora", "valor"]).copy()
 
         if work.empty:
             st.error("No hay datos disponibles para la barra y período seleccionados.")
@@ -616,8 +635,9 @@ def main():
             elif day_diff > 30:
                 st.session_state["all_profiles"] = build_monthly_representative_profiles(
                     work,
-                    total_k,
-                    "Monthly representative profiles (K-Medoids)"
+                    start_date,
+                    end_date,
+                    "Monthly representative profiles"
                 )
             else:
                 st.session_state["all_profiles"] = build_single_day_curve(work, start_date)
