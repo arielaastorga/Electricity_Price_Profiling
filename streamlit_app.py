@@ -5,25 +5,64 @@ import re
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
-
-from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from sklearn_extra.cluster import KMedoids
 
-# ==========================================================
-# CONFIG
-# ==========================================================
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data" / "raw"
+MIN_AVAILABLE_DATE = date(2008, 1, 1)
 
-st.set_page_config(
-    page_title="Electricity Price Profiling",
-    layout="wide"
+st.set_page_config(page_title="Electricity Price Profiling", layout="wide")
+
+st.markdown(
+    """
+    <style>
+    .node-label {
+        font-size: 1.35rem;
+        font-weight: 700;
+        color: #1f2937;
+        margin-bottom: 0.35rem;
+    }
+    .availability-note {
+        font-size: 0.98rem;
+        color: #374151;
+        margin-top: 0.15rem;
+        margin-bottom: 0.75rem;
+    }
+    .kpi-card {
+        border-left: 4px solid #0f766e;
+        background: #ffffff;
+        border-radius: 10px;
+        padding: 0.9rem 1rem;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+        min-height: 120px;
+        margin-bottom: 0.8rem;
+    }
+    .kpi-title {
+        font-size: 0.82rem;
+        font-weight: 700;
+        color: #4b5563;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        margin-bottom: 0.35rem;
+    }
+    .kpi-value {
+        font-size: 2rem;
+        line-height: 1.1;
+        font-weight: 800;
+        color: #111827;
+    }
+    .kpi-sub {
+        font-size: 0.9rem;
+        color: #6b7280;
+        margin-top: 0.35rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
-# ==========================================================
-# FECHAS
-# ==========================================================
+
 def get_required_months(start_date, end_date):
     if start_date > end_date:
         raise ValueError("La fecha inicial no puede ser mayor que la fecha final.")
@@ -34,7 +73,6 @@ def get_required_months(start_date, end_date):
 
     while (year, month) <= (end_date.year, end_date.month):
         months.append(f"{year:04d}-{month:02d}")
-
         if month == 12:
             year += 1
             month = 1
@@ -47,9 +85,7 @@ def get_required_months(start_date, end_date):
 def months_between(start_date, end_date):
     return (end_date.year - start_date.year) * 12 + (end_date.month - start_date.month)
 
-# ==========================================================
-# ARCHIVOS
-# ==========================================================
+
 def extract_month_from_filename(filename):
     match = re.match(r"^(\d{4})(\d{2})CmgBarras\.csv$", filename, flags=re.IGNORECASE)
     if not match:
@@ -61,19 +97,14 @@ def extract_month_from_filename(filename):
 def list_all_csv_files(data_dir=DATA_DIR):
     if not data_dir.exists():
         raise FileNotFoundError(f"La carpeta no existe: {data_dir}")
-
-    return sorted(
-        [p for p in data_dir.iterdir() if p.is_file() and p.suffix.lower() == ".csv"]
-    )
+    return sorted([p for p in data_dir.iterdir() if p.is_file() and p.suffix.lower() == ".csv"])
 
 
 def get_files_for_months(months, data_dir=DATA_DIR):
     all_files = list_all_csv_files(data_dir)
     return [f for f in all_files if extract_month_from_filename(f.name) in months]
 
-# ==========================================================
-# LECTURA CSV
-# ==========================================================
+
 def clean_column_names(df):
     cleaned = []
     for c in df.columns:
@@ -88,17 +119,10 @@ def clean_column_names(df):
 
 def convert_numeric_columns(df):
     numeric_cols = ["anio", "mes", "dia", "hora", "tension", "valor"]
-
     for col in numeric_cols:
         if col in df.columns:
-            df[col] = (
-                df[col]
-                .astype(str)
-                .str.strip()
-                .str.replace(",", ".", regex=False)
-            )
+            df[col] = df[col].astype(str).str.strip().str.replace(",", ".", regex=False)
             df[col] = pd.to_numeric(df[col], errors="coerce")
-
     return df
 
 
@@ -109,22 +133,11 @@ def read_single_csv(file_path):
 
     for enc in encodings_to_try:
         try:
-            df = pd.read_csv(
-                file_path,
-                sep=";",
-                encoding=enc,
-                engine="python",
-                skipinitialspace=True
-            )
-
+            df = pd.read_csv(file_path, sep=";", encoding=enc, engine="python", skipinitialspace=True)
             df = clean_column_names(df)
-
             if all(col in df.columns for col in expected_cols):
-                df = convert_numeric_columns(df)
-                return df
-
+                return convert_numeric_columns(df)
             last_error = f"Columnas detectadas en {file_path.name}: {list(df.columns)}"
-
         except Exception as e:
             last_error = e
 
@@ -133,10 +146,7 @@ def read_single_csv(file_path):
 
 @st.cache_data(show_spinner="Cargando archivos CSV...")
 def load_selected_csvs(file_paths_as_str: tuple):
-    dfs = []
-    loaded_files = []
-    failed_files = []
-
+    dfs, loaded_files, failed_files = [], [], []
     for file_str in file_paths_as_str:
         file = Path(file_str)
         try:
@@ -150,12 +160,9 @@ def load_selected_csvs(file_paths_as_str: tuple):
     if not dfs:
         raise ValueError("No se pudo leer ningún archivo válido.")
 
-    combined_df = pd.concat(dfs, ignore_index=True)
-    return combined_df, loaded_files, failed_files
+    return pd.concat(dfs, ignore_index=True), loaded_files, failed_files
 
-# ==========================================================
-# PREPARACIÓN
-# ==========================================================
+
 def prepare_work_df(df: pd.DataFrame, barra: str | None = None):
     required_cols = ["anio", "mes", "dia", "hora", "valor"]
     missing = [c for c in required_cols if c not in df.columns]
@@ -176,19 +183,21 @@ def prepare_work_df(df: pd.DataFrame, barra: str | None = None):
             "month": pd.to_numeric(work["mes"], errors="coerce"),
             "day": pd.to_numeric(work["dia"], errors="coerce"),
         },
-        errors="coerce"
+        errors="coerce",
     )
-
     work["hora"] = pd.to_numeric(work["hora"], errors="coerce")
     work["valor"] = pd.to_numeric(work["valor"], errors="coerce")
-
     work = work.dropna(subset=["date", "hora", "valor"]).copy()
     work["hora"] = work["hora"].astype(int)
-    work = work[(work["hora"] >= 1) & (work["hora"] <= 24)].copy()
+
+    # Mantengo 0-23 porque así quedó en la versión previa;
+    # si tus datos vienen 1-24, esta parte conviene ajustarla.
+    work = work[(work["hora"] >= 0) & (work["hora"] <= 23)].copy()
 
     if work.empty:
         raise ValueError("No hay datos válidos para construir las curvas.")
 
+    work["day_type"] = work["date"].dt.dayofweek.map(lambda x: "Weekday" if x < 5 else "Weekend")
     return work.sort_values(["date", "hora"])
 
 
@@ -197,35 +206,69 @@ def filter_by_date_range(work: pd.DataFrame, start_date, end_date):
     end_ts = pd.Timestamp(end_date)
     return work[(work["date"] >= start_ts) & (work["date"] <= end_ts)].copy()
 
-# ==========================================================
-# CLUSTERING
-# ==========================================================
-def cluster_curves(
-    df: pd.DataFrame,
-    n_clusters: int = 7,
-    barra: str | None = None,
-    start_date=None,
-    end_date=None,
-    method: str = "kmeans"
-):
-    work = prepare_work_df(df, barra=barra)
 
-    if start_date is not None and end_date is not None:
-        work = filter_by_date_range(work, start_date, end_date)
+def format_number(value, decimals=1):
+    if pd.isna(value):
+        return "N/A"
+    return f"{value:,.{decimals}f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-    if work.empty:
-        raise ValueError("No hay datos dentro del rango seleccionado.")
 
+def kpi_card(title, value, subtitle=""):
+    st.markdown(
+        f"""
+        <div class="kpi-card">
+            <div class="kpi-title">{title}</div>
+            <div class="kpi-value">{value}</div>
+            <div class="kpi-sub">{subtitle}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def compute_kpis(work: pd.DataFrame):
+    analysis = work.copy()
+    analysis["year"] = analysis["date"].dt.year
+    analysis["month_period"] = analysis["date"].dt.to_period("M")
+
+    day_mask = analysis["hora"].between(7, 17)
+    valley_mask = analysis["hora"].between(0, 6)
+    peak_mask = analysis["hora"].between(18, 22)
+
+    min_idx = analysis["valor"].idxmin()
+    max_idx = analysis["valor"].idxmax()
+    min_row = analysis.loc[min_idx]
+    max_row = analysis.loc[max_idx]
+
+    return {
+        "avg_day_hours": analysis.loc[day_mask, "valor"].mean(),
+        "avg_valley_hours": analysis.loc[valley_mask, "valor"].mean(),
+        "avg_peak_hours": analysis.loc[peak_mask, "valor"].mean(),
+        "min_value": min_row["valor"],
+        "min_when": f"{min_row['date'].date()} - {int(min_row['hora']):02d}:00",
+        "max_value": max_row["valor"],
+        "max_when": f"{max_row['date'].date()} - {int(max_row['hora']):02d}:00",
+        "daily_avg": analysis.groupby("date")["valor"].mean().mean(),
+        "monthly_avg": analysis.groupby("month_period")["valor"].mean().mean(),
+        "annual_avg": analysis.groupby("year")["valor"].mean().mean(),
+        "n_days": int(analysis["date"].nunique()),
+        "n_hours": int(len(analysis)),
+    }
+
+
+def cluster_profiles(work: pd.DataFrame, n_clusters: int, title: str):
     daily = (
         work.groupby(["date", "hora"])["valor"]
         .mean()
         .unstack(level="hora")
-        .fillna(0)
         .sort_index(axis=1)
     )
 
-    all_hours = list(range(1, 25))
+    all_hours = list(range(0, 24))
     daily = daily.reindex(columns=all_hours, fill_value=0)
+
+    if daily.empty:
+        raise ValueError("No hay días disponibles para generar perfiles.")
 
     if daily.shape[0] < n_clusters:
         raise ValueError(
@@ -235,114 +278,35 @@ def cluster_curves(
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(daily.values)
 
-    method = method.lower().strip()
+    model = KMedoids(
+        n_clusters=n_clusters,
+        metric="euclidean",
+        init="k-medoids++",
+        random_state=42,
+    )
+    labels = model.fit_predict(X_scaled)
 
-    if method == "kmeans":
-        model = KMeans(
-            n_clusters=n_clusters,
-            random_state=42,
-            n_init=10
-        )
-    elif method == "kmedoids":
-        model = KMedoids(
-            n_clusters=n_clusters,
-            metric="euclidean",
-            init="k-medoids++",
-            random_state=42
-        )
-    else:
-        raise ValueError("method debe ser 'kmeans' o 'kmedoids'.")
+    daily["cluster"] = labels
+    medoid_positions = model.medoid_indices_
+    medoid_dates = daily.index[medoid_positions]
 
-    daily["cluster"] = model.fit_predict(X_scaled)
-    daily["mes"] = daily.index.month
+    profiles = pd.DataFrame(daily.loc[medoid_dates, all_hours].values, columns=all_hours)
+    profile_labels = []
+
+    for cluster_id, medoid_date in enumerate(medoid_dates):
+        freq = int((labels == cluster_id).sum())
+        profile_labels.append(f"Cluster {cluster_id + 1} - {medoid_date.date()} ({freq} días)")
+
+    profiles.index = profile_labels
 
     return {
-        "daily_matrix": daily,
+        "profiles": profiles,
         "hours": all_hours,
-        "model": model,
-        "scaler": scaler,
-        "method": method,
+        "daily_matrix": daily,
+        "title": title,
     }
 
 
-def build_typical_profiles_for_period(daily_results: dict):
-    daily = daily_results["daily_matrix"].copy()
-    hours = daily_results["hours"]
-
-    cluster_counts = daily["cluster"].value_counts()
-    dominant_cluster = cluster_counts.idxmax()
-
-    perfiles_df = pd.DataFrame([
-        daily[daily["cluster"] == dominant_cluster][hours].mean()
-    ])
-    perfiles_df.index = ["Selected period"]
-
-    return {
-        "cluster_reference": {"Selected period": int(dominant_cluster)},
-        "profiles": perfiles_df,
-        "hours": hours,
-        "mode": "period"
-    }
-
-
-def build_monthly_typical_profiles(daily_results: dict):
-    daily = daily_results["daily_matrix"].copy()
-    hours = daily_results["hours"]
-
-    mes_cluster = (
-        daily.groupby("mes")["cluster"]
-        .agg(lambda x: x.mode().iloc[0])
-        .to_dict()
-    )
-
-    perfiles = {}
-    for mes, clus in mes_cluster.items():
-        perfil = daily[daily["cluster"] == clus][hours].mean()
-        perfiles[mes] = perfil
-
-    perfiles_df = pd.DataFrame(perfiles).T
-    perfiles_df.index.name = "month"
-    perfiles_df = perfiles_df.sort_index()
-
-    return {
-        "cluster_reference": mes_cluster,
-        "profiles": perfiles_df,
-        "hours": hours,
-        "mode": "monthly"
-    }
-
-
-def build_single_day_curve(df: pd.DataFrame, barra: str | None, target_date):
-    work = prepare_work_df(df, barra=barra)
-    target_ts = pd.Timestamp(target_date)
-
-    work = work[work["date"] == target_ts].copy()
-
-    if work.empty:
-        raise ValueError("No data available for the selected day and node.")
-
-    curve = (
-        work.groupby("hora")["valor"]
-        .mean()
-        .sort_index()
-        .reindex(range(1, 25), fill_value=0)
-    )
-
-    curve_df = pd.DataFrame(
-        [curve.values],
-        index=[str(target_ts.date())],
-        columns=list(range(1, 25))
-    )
-
-    return {
-        "profiles": curve_df,
-        "hours": list(range(1, 25)),
-        "mode": "single_day"
-    }
-
-# ==========================================================
-# PLOT
-# ==========================================================
 def build_profiles_plot(profiles_df: pd.DataFrame, hours: list[int], title: str):
     fig = go.Figure()
 
@@ -352,7 +316,7 @@ def build_profiles_plot(profiles_df: pd.DataFrame, hours: list[int], title: str)
                 x=hours,
                 y=profiles_df.loc[idx, hours].values,
                 mode="lines+markers",
-                name=str(idx)
+                name=str(idx),
             )
         )
 
@@ -361,25 +325,70 @@ def build_profiles_plot(profiles_df: pd.DataFrame, hours: list[int], title: str)
         xaxis_title="Hour of the Day",
         yaxis_title="Marginal Price (USD/MWh)",
         template="plotly_white",
-        hovermode="x unified"
+        hovermode="x unified",
     )
-
     return fig
 
-# ==========================================================
-# APP
-# ==========================================================
+
+def render_kpis(kpis):
+    row1 = st.columns(3)
+    with row1[0]:
+        kpi_card("Average day hours (07-17h)", f"{format_number(kpis['avg_day_hours'])} USD/MWh")
+    with row1[1]:
+        kpi_card("Average peak hours (18-22h)", f"{format_number(kpis['avg_peak_hours'])} USD/MWh")
+    with row1[2]:
+        kpi_card("Average valley hours (00-06h)", f"{format_number(kpis['avg_valley_hours'])} USD/MWh")
+
+    row2 = st.columns(3)
+    with row2[0]:
+        kpi_card("Minimum value", f"{format_number(kpis['min_value'])} USD/MWh", kpis["min_when"])
+    with row2[1]:
+        kpi_card("Maximum value", f"{format_number(kpis['max_value'])} USD/MWh", kpis["max_when"])
+    with row2[2]:
+        kpi_card("Daily average", f"{format_number(kpis['daily_avg'])} USD/MWh", f"{kpis['n_days']} días analizados")
+
+    row3 = st.columns(2)
+    with row3[0]:
+        kpi_card("Monthly average", f"{format_number(kpis['monthly_avg'])} USD/MWh", f"{kpis['n_hours']} horas")
+    with row3[1]:
+        kpi_card("Annual average", f"{format_number(kpis['annual_avg'])} USD/MWh", "Promedio sobre los años incluidos")
+
+
 def main():
     st.title("Electricity Price Profiling")
     st.write(
         "This application retrieves, processes, and visualizes hourly marginal electricity prices "
-        "by grid node from the Chilean National Electric Coordinator (CEN), enabling exploratory "
-        "analysis of daily, short-term, and monthly price profiles."
+        "by grid node from the Chilean National Electric Coordinator (CEN)."
+    )
+
+    barra_options = []
+    try:
+        all_files = list_all_csv_files(DATA_DIR)
+        if all_files:
+            preview_df, _, _ = load_selected_csvs(tuple(str(p) for p in all_files[:1]))
+            if "barra" in preview_df.columns:
+                barra_options = sorted(preview_df["barra"].dropna().astype(str).unique().tolist())
+    except Exception:
+        barra_options = []
+
+    st.markdown('<div class="node-label">Select a node</div>', unsafe_allow_html=True)
+    if barra_options:
+        selected_barra = st.selectbox("", options=barra_options, label_visibility="collapsed")
+    else:
+        selected_barra = st.text_input("", value="", placeholder="Type a node name", label_visibility="collapsed")
+        if not selected_barra:
+            st.info("No se pudieron precargar las barras. Escribe el nombre exacto de la barra.")
+
+    st.markdown(
+        f'<div class="availability-note">Available data from {MIN_AVAILABLE_DATE.strftime("%d-%m-%Y")} to today.</div>',
+        unsafe_allow_html=True,
     )
 
     selected_range = st.date_input(
         "Select date range",
-        value=(date(2024, 1, 1), date(2024, 12, 31))
+        value=(date(2024, 1, 1), date(2024, 12, 31)),
+        min_value=MIN_AVAILABLE_DATE,
+        max_value=date.today(),
     )
 
     try:
@@ -388,254 +397,114 @@ def main():
         st.warning("Please select both a start date and an end date.")
         st.stop()
 
-    st.info(f"Selected range: {start_date} to {end_date}")
+    if start_date < MIN_AVAILABLE_DATE or end_date > date.today():
+        st.error("El rango seleccionado está fuera de la ventana de datos disponible.")
+        st.stop()
+
+    if months_between(start_date, end_date) >= 12:
+        st.error("Ingrese un período menor a 12 meses.")
+        st.stop()
+
+    months = get_required_months(start_date, end_date)
 
     try:
-        months = get_required_months(start_date, end_date)
         selected_files = get_files_for_months(months, data_dir=DATA_DIR)
-
         if not selected_files:
-            st.warning("No CSV files were found for the selected date range.")
+            st.error("No se encontraron archivos CSV para el rango seleccionado.")
             st.stop()
 
-        df, loaded_files, failed_files = load_selected_csvs(
-            tuple(str(p) for p in selected_files)
-        )
+        df, loaded_files, failed_files = load_selected_csvs(tuple(str(p) for p in selected_files))
+        work = prepare_work_df(df, barra=selected_barra)
+        work = filter_by_date_range(work, start_date, end_date)
 
-        st.session_state["df"] = df
-        st.session_state["selected_files"] = loaded_files
-        st.session_state["failed_files"] = failed_files
+        if work.empty:
+            st.error("No hay datos disponibles para la barra y período seleccionados.")
+            st.stop()
 
     except Exception as e:
         st.error(f"Error while loading files: {e}")
         st.stop()
 
-    df = st.session_state["df"]
-    loaded_files = st.session_state.get("selected_files", [])
-    failed_files = st.session_state.get("failed_files", [])
+    st.subheader("Statistical summary")
+    render_kpis(compute_kpis(work))
 
-    with st.expander(f"Loaded files ({len(loaded_files)})"):
-        st.write(loaded_files)
+    colw, colf, colt = st.columns(3)
+    with colw:
+        weekday_k = st.slider("Weekday clusters (Mon-Fri)", min_value=1, max_value=4, value=2, step=1)
+    with colf:
+        weekend_k = st.slider("Weekend clusters (Sat-Sun)", min_value=1, max_value=4, value=1, step=1)
+    with colt:
+        total_k = st.slider("All-days clusters", min_value=1, max_value=4, value=2, step=1)
+
+    if st.button("Show representative profiles", use_container_width=True):
+        try:
+            weekday_work = work[work["day_type"] == "Weekday"].copy()
+            weekend_work = work[work["day_type"] == "Weekend"].copy()
+
+            st.session_state["weekday_profiles"] = cluster_profiles(
+                weekday_work,
+                weekday_k,
+                "Representative weekday profiles (K-Medoids)"
+            )
+            st.session_state["weekend_profiles"] = cluster_profiles(
+                weekend_work,
+                weekend_k,
+                "Representative weekend profiles (K-Medoids)"
+            )
+            st.session_state["all_profiles"] = cluster_profiles(
+                work,
+                total_k,
+                "Representative profiles for all days (K-Medoids)"
+            )
+
+            st.success("Representative K-Medoids profiles generated successfully.")
+
+        except Exception as e:
+            st.error(f"Error while generating representative profiles: {e}")
+
+    if "weekday_profiles" in st.session_state:
+        result = st.session_state["weekday_profiles"]
+        st.subheader("Weekday representative profiles (K-Medoids)")
+        st.plotly_chart(
+            build_profiles_plot(result["profiles"], result["hours"], result["title"]),
+            use_container_width=True
+        )
+        with st.expander("Weekday representative data"):
+            st.dataframe(result["profiles"], use_container_width=True)
+
+    if "weekend_profiles" in st.session_state:
+        result = st.session_state["weekend_profiles"]
+        st.subheader("Weekend representative profiles (K-Medoids)")
+        st.plotly_chart(
+            build_profiles_plot(result["profiles"], result["hours"], result["title"]),
+            use_container_width=True
+        )
+        with st.expander("Weekend representative data"):
+            st.dataframe(result["profiles"], use_container_width=True)
+
+    if "all_profiles" in st.session_state:
+        result = st.session_state["all_profiles"]
+        st.subheader("Representative profiles for all days (K-Medoids)")
+        st.plotly_chart(
+            build_profiles_plot(result["profiles"], result["hours"], result["title"]),
+            use_container_width=True
+        )
+        with st.expander("All-days representative data"):
+            st.dataframe(result["profiles"], use_container_width=True)
+
+    st.subheader("Dataset summary")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Rows", work.shape[0])
+    c2.metric("Analyzed days", work["date"].nunique())
+    c3.metric("Loaded files", len(loaded_files))
 
     if failed_files:
         with st.expander("Files with errors"):
             failed_df = pd.DataFrame(failed_files, columns=["file", "error"])
             st.dataframe(failed_df, use_container_width=True)
 
-    st.subheader("Dataset summary")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Rows", df.shape[0])
-    c2.metric("Columns", df.shape[1])
-    c3.metric("Loaded files", len(loaded_files))
-
     st.subheader("Preview")
-    st.dataframe(df.head(20), use_container_width=True)
-
-    barra_options = []
-    if "barra" in df.columns:
-        barra_options = sorted(df["barra"].dropna().astype(str).unique().tolist())
-
-    selected_barra = None
-    if barra_options:
-        selected_barra = st.selectbox(
-            "Select a node",
-            options=["All"] + barra_options,
-            index=0
-        )
-        if selected_barra == "All":
-            selected_barra = None
-
-    n_clusters = st.slider(
-        "Number of clusters",
-        min_value=2,
-        max_value=12,
-        value=7,
-        step=1
-    )
-
-    if st.button("Show profiles", use_container_width=True):
-        try:
-            day_diff = (pd.Timestamp(end_date) - pd.Timestamp(start_date)).days
-            month_diff = months_between(start_date, end_date)
-
-            if day_diff == 0:
-                single_result = build_single_day_curve(
-                    df=df,
-                    barra=selected_barra,
-                    target_date=start_date
-                )
-                single_result["title"] = f"Hourly curve - {start_date}"
-
-                st.session_state["curve_results_single_day"] = single_result
-                st.session_state.pop("curve_results_kmeans", None)
-                st.session_state.pop("curve_results_kmedoids", None)
-
-            elif month_diff == 0:
-                daily_results_kmeans = cluster_curves(
-                    df=df,
-                    n_clusters=n_clusters,
-                    barra=selected_barra,
-                    start_date=start_date,
-                    end_date=end_date,
-                    method="kmeans"
-                )
-                result_kmeans = build_typical_profiles_for_period(daily_results_kmeans)
-                result_kmeans["title"] = "Typical profiles for the selected period (KMeans)"
-                result_kmeans["daily_matrix"] = daily_results_kmeans["daily_matrix"]
-
-                daily_results_kmedoids = cluster_curves(
-                    df=df,
-                    n_clusters=n_clusters,
-                    barra=selected_barra,
-                    start_date=start_date,
-                    end_date=end_date,
-                    method="kmedoids"
-                )
-                result_kmedoids = build_typical_profiles_for_period(daily_results_kmedoids)
-                result_kmedoids["title"] = "Typical profiles for the selected period (KMedoids)"
-                result_kmedoids["daily_matrix"] = daily_results_kmedoids["daily_matrix"]
-
-                st.session_state["curve_results_kmeans"] = result_kmeans
-                st.session_state["curve_results_kmedoids"] = result_kmedoids
-                st.session_state.pop("curve_results_single_day", None)
-
-            else:
-                daily_results_kmeans = cluster_curves(
-                    df=df,
-                    n_clusters=n_clusters,
-                    barra=selected_barra,
-                    start_date=start_date,
-                    end_date=end_date,
-                    method="kmeans"
-                )
-                result_kmeans = build_monthly_typical_profiles(daily_results_kmeans)
-                result_kmeans["title"] = "Monthly typical day profiles (KMeans)"
-                result_kmeans["daily_matrix"] = daily_results_kmeans["daily_matrix"]
-
-                daily_results_kmedoids = cluster_curves(
-                    df=df,
-                    n_clusters=n_clusters,
-                    barra=selected_barra,
-                    start_date=start_date,
-                    end_date=end_date,
-                    method="kmedoids"
-                )
-                result_kmedoids = build_monthly_typical_profiles(daily_results_kmedoids)
-                result_kmedoids["title"] = "Monthly typical day profiles (KMedoids)"
-                result_kmedoids["daily_matrix"] = daily_results_kmedoids["daily_matrix"]
-
-                st.session_state["curve_results_kmeans"] = result_kmeans
-                st.session_state["curve_results_kmedoids"] = result_kmedoids
-                st.session_state.pop("curve_results_single_day", None)
-
-            st.success("Profiles generated successfully.")
-
-        except Exception as e:
-            st.error(f"Error while generating profiles: {e}")
-
-    if "curve_results_single_day" in st.session_state:
-        result = st.session_state["curve_results_single_day"]
-        profiles = result["profiles"]
-        hours = result["hours"]
-        title = result["title"]
-
-        st.subheader("Profiles")
-        fig = build_profiles_plot(profiles, hours, title)
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.subheader("Plotted data")
-        st.dataframe(profiles, use_container_width=True)
-
-        csv_profiles = profiles.to_csv(index=True).encode("utf-8")
-        st.download_button(
-            label="Download profiles",
-            data=csv_profiles,
-            file_name="profiles_output_single_day.csv",
-            mime="text/csv",
-            key="download_single_day"
-        )
-
-    if "curve_results_kmeans" in st.session_state:
-        result = st.session_state["curve_results_kmeans"]
-        profiles = result["profiles"]
-        hours = result["hours"]
-        title = result["title"]
-        mode = result["mode"]
-
-        st.subheader("KMeans profiles")
-        fig = build_profiles_plot(profiles, hours, title)
-        st.plotly_chart(fig, use_container_width=True)
-
-        if "daily_matrix" in result:
-            with st.expander("KMeans daily matrix"):
-                st.dataframe(result["daily_matrix"].head(30), use_container_width=True)
-
-        if mode == "monthly":
-            st.subheader("KMeans dominant cluster by month")
-            cluster_df = pd.DataFrame(
-                [{"month": k, "dominant_cluster": v} for k, v in result["cluster_reference"].items()]
-            ).sort_values("month")
-            st.dataframe(cluster_df, use_container_width=True)
-
-        elif mode == "period":
-            st.subheader("KMeans dominant cluster for the selected period")
-            cluster_df = pd.DataFrame(
-                [{"period": k, "dominant_cluster": v} for k, v in result["cluster_reference"].items()]
-            )
-            st.dataframe(cluster_df, use_container_width=True)
-
-        st.subheader("KMeans plotted data")
-        st.dataframe(profiles, use_container_width=True)
-
-        csv_profiles = profiles.to_csv(index=True).encode("utf-8")
-        st.download_button(
-            label="Download KMeans profiles",
-            data=csv_profiles,
-            file_name="profiles_output_kmeans.csv",
-            mime="text/csv",
-            key="download_kmeans"
-        )
-
-    if "curve_results_kmedoids" in st.session_state:
-        result = st.session_state["curve_results_kmedoids"]
-        profiles = result["profiles"]
-        hours = result["hours"]
-        title = result["title"]
-        mode = result["mode"]
-
-        st.subheader("KMedoids profiles")
-        fig = build_profiles_plot(profiles, hours, title)
-        st.plotly_chart(fig, use_container_width=True)
-
-        if "daily_matrix" in result:
-            with st.expander("KMedoids daily matrix"):
-                st.dataframe(result["daily_matrix"].head(30), use_container_width=True)
-
-        if mode == "monthly":
-            st.subheader("KMedoids dominant cluster by month")
-            cluster_df = pd.DataFrame(
-                [{"month": k, "dominant_cluster": v} for k, v in result["cluster_reference"].items()]
-            ).sort_values("month")
-            st.dataframe(cluster_df, use_container_width=True)
-
-        elif mode == "period":
-            st.subheader("KMedoids dominant cluster for the selected period")
-            cluster_df = pd.DataFrame(
-                [{"period": k, "dominant_cluster": v} for k, v in result["cluster_reference"].items()]
-            )
-            st.dataframe(cluster_df, use_container_width=True)
-
-        st.subheader("KMedoids plotted data")
-        st.dataframe(profiles, use_container_width=True)
-
-        csv_profiles = profiles.to_csv(index=True).encode("utf-8")
-        st.download_button(
-            label="Download KMedoids profiles",
-            data=csv_profiles,
-            file_name="profiles_output_kmedoids.csv",
-            mime="text/csv",
-            key="download_kmedoids"
-        )
+    st.dataframe(work.head(20), use_container_width=True)
 
 
 if __name__ == "__main__":
