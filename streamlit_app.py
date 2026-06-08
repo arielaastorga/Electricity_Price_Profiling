@@ -2,8 +2,6 @@ from pathlib import Path
 from datetime import date
 import re
 
-
-
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
@@ -19,17 +17,25 @@ st.set_page_config(page_title="Electricity Price Profiling", layout="wide")
 st.markdown(
     """
     <style>
-    .node-label {
+    .field-label {
         font-size: 1.35rem;
         font-weight: 700;
         color: #1f2937;
-        margin-bottom: 0.35rem;
+        margin-bottom: 0.2rem;
     }
-    .availability-note {
-        font-size: 0.98rem;
-        color: #374151;
-        margin-top: 0.15rem;
-        margin-bottom: 0.75rem;
+    .field-note {
+        font-size: 0.95rem;
+        font-weight: 400;
+        color: #4b5563;
+        margin-top: 0rem;
+        margin-bottom: 0.7rem;
+    }
+    .section-title {
+        font-size: 1.1rem;
+        font-weight: 700;
+        color: #111827;
+        margin-top: 1.2rem;
+        margin-bottom: 0.7rem;
     }
     .kpi-card {
         border-left: 4px solid #0f766e;
@@ -49,13 +55,13 @@ st.markdown(
         margin-bottom: 0.35rem;
     }
     .kpi-value {
-        font-size: 2rem;
+        font-size: 1.9rem;
         line-height: 1.1;
         font-weight: 800;
         color: #111827;
     }
     .kpi-sub {
-        font-size: 0.9rem;
+        font-size: 0.88rem;
         color: #6b7280;
         margin-top: 0.35rem;
     }
@@ -138,7 +144,8 @@ def read_single_csv(file_path):
             df = pd.read_csv(file_path, sep=";", encoding=enc, engine="python", skipinitialspace=True)
             df = clean_column_names(df)
             if all(col in df.columns for col in expected_cols):
-                return convert_numeric_columns(df)
+                df = convert_numeric_columns(df)
+                return df
             last_error = f"Columnas detectadas en {file_path.name}: {list(df.columns)}"
         except Exception as e:
             last_error = e
@@ -146,7 +153,7 @@ def read_single_csv(file_path):
     raise ValueError(f"No se pudo leer {file_path.name}. Último error: {last_error}")
 
 
-@st.cache_data(show_spinner="Cargando archivos CSV...")
+@st.cache_data(show_spinner="Loading CSV files...")
 def load_selected_csvs(file_paths_as_str: tuple):
     dfs, loaded_files, failed_files = [], [], []
     for file_str in file_paths_as_str:
@@ -162,7 +169,9 @@ def load_selected_csvs(file_paths_as_str: tuple):
     if not dfs:
         raise ValueError("No se pudo leer ningún archivo válido.")
 
-    return pd.concat(dfs, ignore_index=True), loaded_files, failed_files
+    combined = pd.concat(dfs, ignore_index=True)
+    combined = combined.dropna(how="all")
+    return combined, loaded_files, failed_files
 
 
 def prepare_work_df(df: pd.DataFrame, barra: str | None = None):
@@ -189,12 +198,12 @@ def prepare_work_df(df: pd.DataFrame, barra: str | None = None):
     )
     work["hora"] = pd.to_numeric(work["hora"], errors="coerce")
     work["valor"] = pd.to_numeric(work["valor"], errors="coerce")
+
     work = work.dropna(subset=["date", "hora", "valor"]).copy()
     work["hora"] = work["hora"].astype(int)
 
-    # Mantengo 0-23 porque así quedó en la versión previa;
-    # si tus datos vienen 1-24, esta parte conviene ajustarla.
-    work = work[(work["hora"] >= 0) & (work["hora"] <= 23)].copy()
+    # Ajustado para horas 1..24
+    work = work[(work["hora"] >= 1) & (work["hora"] <= 24)].copy()
 
     if work.empty:
         raise ValueError("No hay datos válidos para construir las curvas.")
@@ -215,6 +224,12 @@ def format_number(value, decimals=1):
     return f"{value:,.{decimals}f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+def format_int(value):
+    if pd.isna(value):
+        return "N/A"
+    return f"{int(value):,}".replace(",", ".")
+
+
 def kpi_card(title, value, subtitle=""):
     st.markdown(
         f"""
@@ -233,48 +248,70 @@ def compute_kpis(work: pd.DataFrame):
     analysis["year"] = analysis["date"].dt.year
     analysis["month_period"] = analysis["date"].dt.to_period("M")
 
-    day_mask = analysis["hora"].between(7, 17)
-    valley_mask = analysis["hora"].between(0, 6)
-    peak_mask = analysis["hora"].between(18, 22)
+    solar_mask = analysis["hora"].between(8, 18)
+    non_solar_mask = analysis["hora"].between(19, 24) | analysis["hora"].between(1, 7)
 
     min_idx = analysis["valor"].idxmin()
     max_idx = analysis["valor"].idxmax()
     min_row = analysis.loc[min_idx]
     max_row = analysis.loc[max_idx]
 
+    total_hours = len(analysis)
+
+    cmg_eq_0 = (analysis["valor"] == 0).sum()
+    cmg_lt_30 = (analysis["valor"] < 30).sum()
+    cmg_lt_50 = (analysis["valor"] < 50).sum()
+    cmg_lt_100 = (analysis["valor"] < 100).sum()
+
+    avg_period = analysis["valor"].mean()
+    solar_avg = analysis.loc[solar_mask, "valor"].mean()
+    non_solar_avg = analysis.loc[non_solar_mask, "valor"].mean()
+
     return {
-        "avg_day_hours": analysis.loc[day_mask, "valor"].mean(),
-        "avg_valley_hours": analysis.loc[valley_mask, "valor"].mean(),
-        "avg_peak_hours": analysis.loc[peak_mask, "valor"].mean(),
+        "avg_period": avg_period,
+        "p50": analysis["valor"].quantile(0.50),
+        "p90": analysis["valor"].quantile(0.90),
         "min_value": min_row["valor"],
         "min_when": f"{min_row['date'].date()} - {int(min_row['hora']):02d}:00",
         "max_value": max_row["valor"],
         "max_when": f"{max_row['date'].date()} - {int(max_row['hora']):02d}:00",
-        "daily_avg": analysis.groupby("date")["valor"].mean().mean(),
-        "monthly_avg": analysis.groupby("month_period")["valor"].mean().mean(),
-        "annual_avg": analysis.groupby("year")["valor"].mean().mean(),
+        "solar_avg": solar_avg,
+        "non_solar_avg": non_solar_avg,
+        "spread_solar_non_solar": non_solar_avg - solar_avg if pd.notna(solar_avg) and pd.notna(non_solar_avg) else pd.NA,
+        "cmg_eq_0": cmg_eq_0,
+        "cmg_lt_30": cmg_lt_30,
+        "cmg_lt_50": cmg_lt_50,
+        "cmg_lt_100": cmg_lt_100,
+        "cmg_eq_0_pct": (cmg_eq_0 / total_hours * 100) if total_hours else pd.NA,
+        "cmg_lt_30_pct": (cmg_lt_30 / total_hours * 100) if total_hours else pd.NA,
+        "cmg_lt_50_pct": (cmg_lt_50 / total_hours * 100) if total_hours else pd.NA,
+        "cmg_lt_100_pct": (cmg_lt_100 / total_hours * 100) if total_hours else pd.NA,
         "n_days": int(analysis["date"].nunique()),
-        "n_hours": int(len(analysis)),
+        "n_hours": int(total_hours),
     }
 
 
 def cluster_profiles(work: pd.DataFrame, n_clusters: int, title: str):
+    subset = work.copy()
+    subset = subset.dropna(subset=["date", "hora", "valor"])
+
     daily = (
-        work.groupby(["date", "hora"])["valor"]
+        subset.groupby(["date", "hora"])["valor"]
         .mean()
         .unstack(level="hora")
         .sort_index(axis=1)
     )
 
-    all_hours = list(range(0, 24))
-    daily = daily.reindex(columns=all_hours, fill_value=0)
+    all_hours = list(range(1, 25))
+    daily = daily.reindex(columns=all_hours)
+    daily = daily.dropna(axis=0, how="any").copy()
 
     if daily.empty:
-        raise ValueError("No hay días disponibles para generar perfiles.")
+        raise ValueError("No hay días completos sin NaN para generar perfiles.")
 
     if daily.shape[0] < n_clusters:
         raise ValueError(
-            f"No hay suficientes días ({daily.shape[0]}) para formar {n_clusters} clusters."
+            f"No hay suficientes días completos ({daily.shape[0]}) para formar {n_clusters} clusters."
         )
 
     scaler = StandardScaler()
@@ -297,7 +334,7 @@ def cluster_profiles(work: pd.DataFrame, n_clusters: int, title: str):
 
     for cluster_id, medoid_date in enumerate(medoid_dates):
         freq = int((labels == cluster_id).sum())
-        profile_labels.append(f"Cluster {cluster_id + 1} - {medoid_date.date()} ({freq} días)")
+        profile_labels.append(f"Cluster {cluster_id + 1} - {medoid_date.date()} ({freq} days)")
 
     profiles.index = profile_labels
 
@@ -333,27 +370,60 @@ def build_profiles_plot(profiles_df: pd.DataFrame, hours: list[int], title: str)
 
 
 def render_kpis(kpis):
+    st.markdown('<div class="section-title">General KPI</div>', unsafe_allow_html=True)
     row1 = st.columns(3)
     with row1[0]:
-        kpi_card("Average day hours (07-17h)", f"{format_number(kpis['avg_day_hours'])} USD/MWh")
+        kpi_card(
+            "Selected period average",
+            f"{format_number(kpis['avg_period'])} USD/MWh",
+            f"{kpis['n_days']} days · {kpis['n_hours']} hours"
+        )
     with row1[1]:
-        kpi_card("Average peak hours (18-22h)", f"{format_number(kpis['avg_peak_hours'])} USD/MWh")
+        kpi_card("P50", f"{format_number(kpis['p50'])} USD/MWh")
     with row1[2]:
-        kpi_card("Average valley hours (00-06h)", f"{format_number(kpis['avg_valley_hours'])} USD/MWh")
+        kpi_card("P90", f"{format_number(kpis['p90'])} USD/MWh")
 
-    row2 = st.columns(3)
+    row2 = st.columns(2)
     with row2[0]:
         kpi_card("Minimum value", f"{format_number(kpis['min_value'])} USD/MWh", kpis["min_when"])
     with row2[1]:
         kpi_card("Maximum value", f"{format_number(kpis['max_value'])} USD/MWh", kpis["max_when"])
-    with row2[2]:
-        kpi_card("Daily average", f"{format_number(kpis['daily_avg'])} USD/MWh", f"{kpis['n_days']} días analizados")
 
-    row3 = st.columns(2)
+    st.markdown('<div class="section-title">Solar window KPI</div>', unsafe_allow_html=True)
+    row3 = st.columns(3)
     with row3[0]:
-        kpi_card("Monthly average", f"{format_number(kpis['monthly_avg'])} USD/MWh", f"{kpis['n_hours']} horas")
+        kpi_card("Average solar hours (08h-18h)", f"{format_number(kpis['solar_avg'])} USD/MWh")
     with row3[1]:
-        kpi_card("Annual average", f"{format_number(kpis['annual_avg'])} USD/MWh", "Promedio sobre los años incluidos")
+        kpi_card("Average non-solar hours (19h-07h)", f"{format_number(kpis['non_solar_avg'])} USD/MWh")
+    with row3[2]:
+        kpi_card("Solar / non-solar spread", f"{format_number(kpis['spread_solar_non_solar'])} USD/MWh", "Non-solar minus solar")
+
+    st.markdown('<div class="section-title">Curtailment</div>', unsafe_allow_html=True)
+    row4 = st.columns(4)
+    with row4[0]:
+        kpi_card(
+            "Hours with CMG = 0",
+            f"{format_int(kpis['cmg_eq_0'])} h",
+            f"{format_number(kpis['cmg_eq_0_pct'])}% of sample"
+        )
+    with row4[1]:
+        kpi_card(
+            "Hours with CMG < 30",
+            f"{format_int(kpis['cmg_lt_30'])} h",
+            f"{format_number(kpis['cmg_lt_30_pct'])}% of sample"
+        )
+    with row4[2]:
+        kpi_card(
+            "Hours with CMG < 50",
+            f"{format_int(kpis['cmg_lt_50'])} h",
+            f"{format_number(kpis['cmg_lt_50_pct'])}% of sample"
+        )
+    with row4[3]:
+        kpi_card(
+            "Hours with CMG < 100",
+            f"{format_int(kpis['cmg_lt_100'])} h",
+            f"{format_number(kpis['cmg_lt_100_pct'])}% of sample"
+        )
 
 
 def main():
@@ -373,7 +443,7 @@ def main():
     except Exception:
         barra_options = []
 
-    st.markdown('<div class="node-label">Select a node</div>', unsafe_allow_html=True)
+    st.markdown('<div class="field-label">Select a node</div>', unsafe_allow_html=True)
     if barra_options:
         selected_barra = st.selectbox("", options=barra_options, label_visibility="collapsed")
     else:
@@ -381,16 +451,18 @@ def main():
         if not selected_barra:
             st.info("No se pudieron precargar las barras. Escribe el nombre exacto de la barra.")
 
+    st.markdown('<div class="field-label">Select date range</div>', unsafe_allow_html=True)
     st.markdown(
-        f'<div class="availability-note">Available data from {MIN_AVAILABLE_DATE.strftime("%d-%m-%Y")} to today.</div>',
+        f'<div class="field-note">(Available data from {MIN_AVAILABLE_DATE.strftime("%d-%m-%Y")} to today.)</div>',
         unsafe_allow_html=True,
     )
 
     selected_range = st.date_input(
-        "Select date range",
+        "",
         value=(date(2024, 1, 1), date(2024, 12, 31)),
         min_value=MIN_AVAILABLE_DATE,
         max_value=date.today(),
+        label_visibility="collapsed",
     )
 
     try:
@@ -418,6 +490,7 @@ def main():
         df, loaded_files, failed_files = load_selected_csvs(tuple(str(p) for p in selected_files))
         work = prepare_work_df(df, barra=selected_barra)
         work = filter_by_date_range(work, start_date, end_date)
+        work = work.dropna(subset=["date", "hora", "valor"]).copy()
 
         if work.empty:
             st.error("No hay datos disponibles para la barra y período seleccionados.")
