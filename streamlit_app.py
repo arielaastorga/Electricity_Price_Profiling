@@ -12,59 +12,62 @@ APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data" / "raw"
 MIN_AVAILABLE_DATE = date(2008, 1, 1)
 
+SOLAR_BORDER = "#1d4ed8"
+CURTAILMENT_BORDER = "#7dd3fc"
+GENERAL_BORDER = "#0f766e"
+
 st.set_page_config(page_title="Electricity Price Profiling", layout="wide")
 
 st.markdown(
-    """
+    f"""
     <style>
-    .field-label {
+    .field-label {{
         font-size: 1.35rem;
         font-weight: 700;
         color: #1f2937;
         margin-bottom: 0.2rem;
-    }
-    .field-note {
+    }}
+    .field-note {{
         font-size: 0.95rem;
         font-weight: 400;
         color: #4b5563;
         margin-top: 0rem;
         margin-bottom: 0.7rem;
-    }
-    .section-title {
+    }}
+    .section-title {{
         font-size: 1.1rem;
         font-weight: 700;
         color: #111827;
         margin-top: 1.2rem;
         margin-bottom: 0.7rem;
-    }
-    .kpi-card {
-        border-left: 4px solid #0f766e;
+    }}
+    .kpi-card {{
         background: #ffffff;
         border-radius: 10px;
         padding: 0.9rem 1rem;
         box-shadow: 0 1px 4px rgba(0,0,0,0.06);
         min-height: 120px;
         margin-bottom: 0.8rem;
-    }
-    .kpi-title {
+    }}
+    .kpi-title {{
         font-size: 0.82rem;
         font-weight: 700;
         color: #4b5563;
         text-transform: uppercase;
         letter-spacing: 0.03em;
         margin-bottom: 0.35rem;
-    }
-    .kpi-value {
+    }}
+    .kpi-value {{
         font-size: 1.9rem;
         line-height: 1.1;
         font-weight: 800;
         color: #111827;
-    }
-    .kpi-sub {
+    }}
+    .kpi-sub {{
         font-size: 0.88rem;
         color: #6b7280;
         margin-top: 0.35rem;
-    }
+    }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -201,8 +204,6 @@ def prepare_work_df(df: pd.DataFrame, barra: str | None = None):
 
     work = work.dropna(subset=["date", "hora", "valor"]).copy()
     work["hora"] = work["hora"].astype(int)
-
-    # Ajustado para horas 1..24
     work = work[(work["hora"] >= 1) & (work["hora"] <= 24)].copy()
 
     if work.empty:
@@ -230,10 +231,10 @@ def format_int(value):
     return f"{int(value):,}".replace(",", ".")
 
 
-def kpi_card(title, value, subtitle=""):
+def kpi_card(title, value, subtitle="", border_color=GENERAL_BORDER):
     st.markdown(
         f"""
-        <div class="kpi-card">
+        <div class="kpi-card" style="border-left: 4px solid {border_color};">
             <div class="kpi-title">{title}</div>
             <div class="kpi-value">{value}</div>
             <div class="kpi-sub">{subtitle}</div>
@@ -245,8 +246,6 @@ def kpi_card(title, value, subtitle=""):
 
 def compute_kpis(work: pd.DataFrame):
     analysis = work.copy()
-    analysis["year"] = analysis["date"].dt.year
-    analysis["month_period"] = analysis["date"].dt.to_period("M")
 
     solar_mask = analysis["hora"].between(8, 18)
     non_solar_mask = analysis["hora"].between(19, 24) | analysis["hora"].between(1, 7)
@@ -341,7 +340,144 @@ def cluster_profiles(work: pd.DataFrame, n_clusters: int, title: str):
     return {
         "profiles": profiles,
         "hours": all_hours,
-        "daily_matrix": daily,
+        "title": title,
+    }
+
+
+def build_typical_profiles_for_period_kmedoids(work: pd.DataFrame, n_clusters: int, title: str):
+    daily = (
+        work.groupby(["date", "hora"])["valor"]
+        .mean()
+        .unstack(level="hora")
+        .sort_index(axis=1)
+    )
+
+    all_hours = list(range(1, 25))
+    daily = daily.reindex(columns=all_hours)
+    daily = daily.dropna(axis=0, how="any").copy()
+
+    if daily.empty:
+        raise ValueError("No hay días completos sin NaN para construir el perfil del período.")
+
+    if daily.shape[0] < n_clusters:
+        raise ValueError(
+            f"No hay suficientes días completos ({daily.shape[0]}) para formar {n_clusters} clusters."
+        )
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(daily.values)
+
+    model = KMedoids(
+        n_clusters=n_clusters,
+        metric="euclidean",
+        init="k-medoids++",
+        random_state=42,
+    )
+    labels = model.fit_predict(X_scaled)
+
+    daily["cluster"] = labels
+    cluster_counts = pd.Series(labels).value_counts()
+    dominant_cluster = int(cluster_counts.idxmax())
+
+    medoid_position = model.medoid_indices_[dominant_cluster]
+    medoid_date = daily.index[medoid_position]
+
+    profiles = pd.DataFrame(
+        [daily.loc[medoid_date, all_hours].values],
+        index=[f"Selected period - {medoid_date.date()}"],
+        columns=all_hours,
+    )
+
+    return {
+        "profiles": profiles,
+        "hours": all_hours,
+        "title": title,
+    }
+
+
+def build_single_day_curve(work: pd.DataFrame, target_date):
+    target_ts = pd.Timestamp(target_date)
+    one_day = work[work["date"] == target_ts].copy()
+
+    if one_day.empty:
+        raise ValueError("No data available for the selected day and node.")
+
+    curve = (
+        one_day.groupby("hora")["valor"]
+        .mean()
+        .sort_index()
+        .reindex(range(1, 25))
+        .dropna()
+    )
+
+    curve = curve.reindex(range(1, 25), fill_value=0)
+
+    curve_df = pd.DataFrame(
+        [curve.values],
+        index=[str(target_ts.date())],
+        columns=list(range(1, 25)),
+    )
+
+    return {
+        "profiles": curve_df,
+        "hours": list(range(1, 25)),
+        "title": f"Hourly curve - {target_ts.date()}",
+    }
+
+
+def build_monthly_typical_profiles_kmedoids(work: pd.DataFrame, n_clusters: int, title: str):
+    daily = (
+        work.groupby(["date", "hora"])["valor"]
+        .mean()
+        .unstack(level="hora")
+        .sort_index(axis=1)
+    )
+
+    all_hours = list(range(1, 25))
+    daily = daily.reindex(columns=all_hours)
+    daily = daily.dropna(axis=0, how="any").copy()
+
+    if daily.empty:
+        raise ValueError("No hay días completos sin NaN para construir perfiles mensuales.")
+
+    if daily.shape[0] < n_clusters:
+        raise ValueError(
+            f"No hay suficientes días completos ({daily.shape[0]}) para formar {n_clusters} clusters."
+        )
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(daily.values)
+
+    model = KMedoids(
+        n_clusters=n_clusters,
+        metric="euclidean",
+        init="k-medoids++",
+        random_state=42,
+    )
+    labels = model.fit_predict(X_scaled)
+
+    daily["cluster"] = labels
+    daily["mes"] = daily.index.month
+
+    mes_cluster = (
+        daily.groupby("mes")["cluster"]
+        .agg(lambda x: x.mode().iloc[0])
+        .to_dict()
+    )
+
+    perfiles = {}
+    for mes, clus in mes_cluster.items():
+        cluster_dates = daily[daily["cluster"] == clus].index
+        medoid_date = cluster_dates[0]
+        perfiles[mes] = daily.loc[medoid_date, all_hours]
+
+    perfiles_df = pd.DataFrame(perfiles).T
+    perfiles_df.index.name = "month"
+    perfiles_df = perfiles_df.sort_index()
+
+    return {
+        "profiles": perfiles_df,
+        "hours": all_hours,
         "title": title,
     }
 
@@ -376,27 +512,28 @@ def render_kpis(kpis):
         kpi_card(
             "Selected period average",
             f"{format_number(kpis['avg_period'])} USD/MWh",
-            f"{kpis['n_days']} days · {kpis['n_hours']} hours"
+            f"{kpis['n_days']} days · {kpis['n_hours']} hours",
+            border_color=GENERAL_BORDER,
         )
     with row1[1]:
-        kpi_card("P50", f"{format_number(kpis['p50'])} USD/MWh")
+        kpi_card("P50", f"{format_number(kpis['p50'])} USD/MWh", border_color=GENERAL_BORDER)
     with row1[2]:
-        kpi_card("P90", f"{format_number(kpis['p90'])} USD/MWh")
+        kpi_card("P90", f"{format_number(kpis['p90'])} USD/MWh", border_color=GENERAL_BORDER)
 
     row2 = st.columns(2)
     with row2[0]:
-        kpi_card("Minimum value", f"{format_number(kpis['min_value'])} USD/MWh", kpis["min_when"])
+        kpi_card("Minimum value", f"{format_number(kpis['min_value'])} USD/MWh", kpis["min_when"], border_color=GENERAL_BORDER)
     with row2[1]:
-        kpi_card("Maximum value", f"{format_number(kpis['max_value'])} USD/MWh", kpis["max_when"])
+        kpi_card("Maximum value", f"{format_number(kpis['max_value'])} USD/MWh", kpis["max_when"], border_color=GENERAL_BORDER)
 
     st.markdown('<div class="section-title">Solar window KPI</div>', unsafe_allow_html=True)
     row3 = st.columns(3)
     with row3[0]:
-        kpi_card("Average solar hours (08h-18h)", f"{format_number(kpis['solar_avg'])} USD/MWh")
+        kpi_card("Average solar hours (08h-18h)", f"{format_number(kpis['solar_avg'])} USD/MWh", border_color=SOLAR_BORDER)
     with row3[1]:
-        kpi_card("Average non-solar hours (19h-07h)", f"{format_number(kpis['non_solar_avg'])} USD/MWh")
+        kpi_card("Average non-solar hours (19h-07h)", f"{format_number(kpis['non_solar_avg'])} USD/MWh", border_color=SOLAR_BORDER)
     with row3[2]:
-        kpi_card("Solar / non-solar spread", f"{format_number(kpis['spread_solar_non_solar'])} USD/MWh", "Non-solar minus solar")
+        kpi_card("Solar / non-solar spread", f"{format_number(kpis['spread_solar_non_solar'])} USD/MWh", "Non-solar minus solar", border_color=SOLAR_BORDER)
 
     st.markdown('<div class="section-title">Curtailment</div>', unsafe_allow_html=True)
     row4 = st.columns(4)
@@ -404,25 +541,29 @@ def render_kpis(kpis):
         kpi_card(
             "Hours with CMG = 0",
             f"{format_int(kpis['cmg_eq_0'])} h",
-            f"{format_number(kpis['cmg_eq_0_pct'])}% of sample"
+            f"{format_number(kpis['cmg_eq_0_pct'])}% of sample",
+            border_color=CURTAILMENT_BORDER,
         )
     with row4[1]:
         kpi_card(
             "Hours with CMG < 30",
             f"{format_int(kpis['cmg_lt_30'])} h",
-            f"{format_number(kpis['cmg_lt_30_pct'])}% of sample"
+            f"{format_number(kpis['cmg_lt_30_pct'])}% of sample",
+            border_color=CURTAILMENT_BORDER,
         )
     with row4[2]:
         kpi_card(
             "Hours with CMG < 50",
             f"{format_int(kpis['cmg_lt_50'])} h",
-            f"{format_number(kpis['cmg_lt_50_pct'])}% of sample"
+            f"{format_number(kpis['cmg_lt_50_pct'])}% of sample",
+            border_color=CURTAILMENT_BORDER,
         )
     with row4[3]:
         kpi_card(
             "Hours with CMG < 100",
             f"{format_int(kpis['cmg_lt_100'])} h",
-            f"{format_number(kpis['cmg_lt_100_pct'])}% of sample"
+            f"{format_number(kpis['cmg_lt_100_pct'])}% of sample",
+            border_color=CURTAILMENT_BORDER,
         )
 
 
@@ -526,11 +667,24 @@ def main():
                 weekend_k,
                 "Representative weekend profiles (K-Medoids)"
             )
-            st.session_state["all_profiles"] = cluster_profiles(
-                work,
-                total_k,
-                "Representative profiles for all days (K-Medoids)"
-            )
+
+            day_diff = (pd.Timestamp(end_date) - pd.Timestamp(start_date)).days
+            month_diff = months_between(start_date, end_date)
+
+            if day_diff == 0:
+                st.session_state["all_profiles"] = build_single_day_curve(work, start_date)
+            elif month_diff == 0:
+                st.session_state["all_profiles"] = build_typical_profiles_for_period_kmedoids(
+                    work,
+                    total_k,
+                    "Representative profile for selected period (K-Medoids)"
+                )
+            else:
+                st.session_state["all_profiles"] = build_monthly_typical_profiles_kmedoids(
+                    work,
+                    total_k,
+                    "Monthly representative profiles (K-Medoids)"
+                )
 
             st.success("Representative K-Medoids profiles generated successfully.")
 
